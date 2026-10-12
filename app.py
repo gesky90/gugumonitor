@@ -5,8 +5,14 @@ import os
 import threading
 import time
 from datetime import datetime, date
-import pandas as pd
 import requests
+
+# 尝试导入无感自动刷新组件
+try:
+    from streamlit_autorefresh import st_autorefresh
+    HAS_AUTOREFRESH = True
+except ImportError:
+    HAS_AUTOREFRESH = False
 
 # ==========================================
 # 页面基础配置与高颜值 UI 样式注入
@@ -14,63 +20,55 @@ import requests
 st.set_page_config(page_title="愤怒的小咕 - 纯净监控台", layout="wide")
 st.markdown("""
 <style>
-    /* 遗漏统计框 */
-    .omit-box {
+    /* 容器基础样式 */
+    .white-box {
         background-color: white;
-        border-top: 4px solid #ef4444;
         border-radius: 8px;
-        padding: 15px;
+        padding: 20px;
         box-shadow: 0 1px 3px rgba(0,0,0,0.1);
         margin-bottom: 20px;
     }
-    
-    /* 走势图容器 */
-    .trend-container {
-        background: white;
-        padding: 20px;
-        border-radius: 8px;
-        box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-        margin-top: 10px;
-    }
+    .omit-box { border-top: 4px solid #ef4444; }
+    .table-box { border-top: 4px solid #3b82f6; }
+    .trend-box-container { border-top: 4px solid #10b981; }
+
+    /* 走势图排版 */
     .trend-row {
         display: flex;
         align-items: center;
-        margin-bottom: 8px;
-        padding-bottom: 8px;
+        margin-bottom: 10px;
+        padding-bottom: 10px;
         border-bottom: 1px dashed #f3f4f6;
     }
     .trend-label {
-        width: 85px;
+        width: 100px;
         font-size: 13px;
         color: #6b7280;
         font-weight: bold;
     }
-    .trend-grid {
-        display: flex;
-        gap: 6px;
-    }
+    .trend-grid { display: flex; gap: 6px; flex-wrap: wrap; }
     
-    /* 走势图方块基础样式 */
-    .trend-box {
-        width: 32px;
-        height: 32px;
-        border-radius: 6px;
-        display: flex;
+    /* === 颜色分级与发光特效 === */
+    .icon-box {
+        display: inline-flex;
         justify-content: center;
         align-items: center;
         font-weight: bold;
-        font-size: 15px;
+        border-radius: 6px;
     }
     
-    /* === 颜色分级与发光特效 === */
+    /* 走势图大方块 (32x32) */
+    .sz-lg { width: 32px; height: 32px; font-size: 15px; }
+    /* 表格/列表小方块 (24x24) */
+    .sz-sm { width: 24px; height: 24px; font-size: 12px; margin-right: 8px; }
+
     /* 小奖 1-3：低调灰色 */
     .bg-gray { background-color: #e5e7eb; color: #6b7280; } 
-    
     /* 大奖 4-7：高亮渐变 + 发光特效 */
-    .bg-D { background-color: #a855f7; color: white; box-shadow: 0 0 8px rgba(168, 85, 247, 0.6); } /* 彩虹-紫 */
-    .bg-E { background-color: #ec4899; color: white; box-shadow: 0 0 8px rgba(236, 72, 153, 0.6); } /* 海盗-粉 */
-    .bg-F { background-color: #ef4444; color: white; box-shadow: 0 0 8px rgba(239, 68, 68, 0.6); } /* 摆锤-红 */
-    .bg-G { background-color: #eab308; color: white; box-shadow: 0 0 8px rgba(234, 179, 8, 0.6); }  /* 云霄-金 */
+    .bg-D { background-color: #a855f7; color: white; box-shadow: 0 0 8px rgba(168, 85, 247, 0.6); } /* 紫 */
+    .bg-E { background-color: #ec4899; color: white; box-shadow: 0 0 8px rgba(236, 72, 153, 0.6); } /* 粉 */
+    .bg-F { background-color: #ef4444; color: white; box-shadow: 0 0 8px rgba(239, 68, 68, 0.6); } /* 红 */
+    .bg-G { background-color: #eab308; color: white; box-shadow: 0 0 8px rgba(234, 179, 8, 0.6); } /* 金 */
     
     .empty-box {
         width: 32px; height: 32px; border-radius: 6px;
@@ -86,7 +84,6 @@ BASE_DIR = os.getcwd()
 DATA_FILE = os.path.join(BASE_DIR, 'game_history.json')
 CONFIG_FILE = os.path.join(BASE_DIR, 'sync_config.json')
 
-# 核心映射配置
 CONFIG = {
     'A': {'name': '观光小火车', 'm': 4},
     'B': {'name': '旋转木马', 'm': 4},
@@ -99,7 +96,7 @@ CONFIG = {
 OPTIONS = list(CONFIG.keys())
 TOWER_MAP_REMOTE = {1: 'G', 2: 'F', 3: 'E', 4: 'D', 5: 'C', 6: 'B', 7: 'A'}
 
-# UI 视觉映射字典 (首字 + 颜色类)
+# UI 视觉映射字典
 UI_MAP = {
     'A': {'char': '观', 'class': 'bg-gray'},
     'B': {'char': '旋', 'class': 'bg-gray'},
@@ -145,10 +142,8 @@ def get_pure_history():
 # ==========================================
 def fetch_remote_rows(day):
     cfg = get_sync_config()
-    # 加上时间戳绕过 Cloudflare 缓存，确保秒级更新
     url = f"{cfg['url'].rstrip('/')}/api/data?date={day}&_t={int(time.time())}"
     try:
-        # 使用 Session 提速
         session = requests.Session()
         resp = session.get(url, timeout=10)
         arr = resp.json()
@@ -186,8 +181,7 @@ def background_worker():
         cfg = get_sync_config()
         if cfg.get('enabled', True):
             sync_remote_once()
-        # 强制高频 5 秒刷新
-        time.sleep(5)
+        time.sleep(5) # 后台严格5秒抓取一次
 
 if 'worker_started' not in st.session_state:
     load_data()
@@ -195,9 +189,16 @@ if 'worker_started' not in st.session_state:
     st.session_state.worker_started = True
 
 # ==========================================
-# Streamlit 前端渲染
+# Streamlit 前端渲染与静默刷新
 # ==========================================
+# 启动前端页面无感倒计时自动刷新 (每隔5秒重新加载一次页面组件，不卡死后端)
+if HAS_AUTOREFRESH:
+    st_autorefresh(interval=5000, key="data_refresher")
+
 st.markdown("### 📊 愤怒的小咕 - 纯净数据监控台")
+
+if not HAS_AUTOREFRESH:
+    st.error("⚠️ 未检测到自动刷新插件，请在 requirements.txt 中添加 `streamlit-autorefresh` 以开启丝滑自动刷新。")
 
 # --- 左侧栏控制 ---
 with st.sidebar:
@@ -224,67 +225,85 @@ for o in OPTIONS:
 # --- 主界面布局 ---
 col1, col2 = st.columns([1, 3])
 
+# 渲染左侧：遗漏统计 (带彩色徽章)
 with col1:
-    st.markdown("<div class='omit-box'>", unsafe_allow_html=True)
-    st.markdown("#### ⏳ 间隔统计 (遗漏值)")
+    html_omit = "<div class='white-box omit-box'><h4>⏳ 间隔统计 (遗漏值)</h4>"
     for o in OPTIONS:
-        color = "red" if omit_counts[o] >= 10 else "black"
-        weight = "bold" if omit_counts[o] >= 10 else "normal"
-        st.markdown(
-            f"<div style='display: flex; justify-content: space-between; border-bottom: 1px dashed #eee; padding: 5px 0;'>"
-            f"<span style='color: #4b5563; font-size: 14px;'>{o}. {CONFIG[o]['name']}</span>"
-            f"<span style='color: {color}; font-weight: {weight};'>{omit_counts[o]} 把</span>"
-            f"</div>", 
-            unsafe_allow_html=True
-        )
-    st.markdown("</div>", unsafe_allow_html=True)
-
-with col2:
-    st.markdown("#### 📊 数据统计大表")
-    table_data = []
-    for o in OPTIONS:
-        table_data.append({
-            "游乐项目": f"{o}. {CONFIG[o]['name']}",
-            "星级/倍率": f"{CONFIG[o]['m']}星",
-            "当前遗漏 (局)": omit_counts[o],
-            "累计出现次数": total_counts[o]
-        })
-    st.dataframe(pd.DataFrame(table_data), use_container_width=True, hide_index=True)
-    
-    # ----------------------------------------
-    # 高颜值走势图生成 (15局/行)
-    # ----------------------------------------
-    st.markdown("#### 📌 历史走势图 (15分钟/行)")
-    
-    if len(pure_history) > 0:
-        html_str = "<div class='trend-container'>"
+        ui = UI_MAP[o]
+        omit = omit_counts[o]
+        color = "#ef4444" if omit >= 10 else "#111827"
+        weight = "bold" if omit >= 10 else "500"
         
-        # 将历史记录按 15 个一组进行切割
+        html_omit += f"""
+        <div style='display: flex; justify-content: space-between; align-items: center; border-bottom: 1px dashed #e5e7eb; padding: 8px 0;'>
+            <div style='display: flex; align-items: center; color: #374151; font-size: 14px; font-weight: 500;'>
+                <span class='icon-box sz-sm {ui['class']}'>{ui['char']}</span>
+                {o}. {CONFIG[o]['name']}
+            </div>
+            <span style='color: {color}; font-weight: {weight};'>{omit} 把</span>
+        </div>
+        """
+    html_omit += "</div>"
+    st.markdown(html_omit, unsafe_allow_html=True)
+
+# 渲染右侧：数据大表与走势图
+with col2:
+    # 渲染数据统计大表 (手写 HTML 替换默认表格，支持彩色 UI)
+    html_table = f"""
+    <div class='white-box table-box'>
+        <h4 style='margin-bottom: 15px;'>📊 数据统计大表</h4>
+        <table style='width: 100%; border-collapse: collapse; text-align: left; font-size: 14px;'>
+            <tr style='border-bottom: 1px solid #e5e7eb; color: #6b7280; font-size: 13px;'>
+                <th style='padding: 10px 8px;'>游乐项目</th>
+                <th style='padding: 10px 8px;'>星级/倍率</th>
+                <th style='padding: 10px 8px;'>当前遗漏 (局)</th>
+                <th style='padding: 10px 8px;'>累计出现次数</th>
+            </tr>
+    """
+    for o in OPTIONS:
+        ui = UI_MAP[o]
+        omit = omit_counts[o]
+        omit_color = "#ef4444" if omit >= 10 else "#111827"
+        omit_weight = "bold" if omit >= 10 else "500"
+        
+        html_table += f"""
+            <tr style='border-bottom: 1px solid #f3f4f6;'>
+                <td style='padding: 10px 8px; display: flex; align-items: center; color: #1f2937; font-weight: 500;'>
+                    <span class='icon-box sz-sm {ui['class']}'>{ui['char']}</span>
+                    {o}. {CONFIG[o]['name']}
+                </td>
+                <td style='padding: 10px 8px; color: #4b5563;'>{CONFIG[o]['m']}星</td>
+                <td style='padding: 10px 8px; color: {omit_color}; font-weight: {omit_weight};'>{omit}</td>
+                <td style='padding: 10px 8px; color: #111827; font-weight: 500;'>{total_counts[o]}</td>
+            </tr>
+        """
+    html_table += "</table></div>"
+    st.markdown(html_table, unsafe_allow_html=True)
+    
+    # 渲染历史走势图 (15分钟/行)
+    if len(pure_history) > 0:
+        html_trend = "<div class='white-box trend-box-container'><h4 style='margin-bottom: 15px;'>📌 历史走势图 (15分钟/行)</h4>"
+        
         for i in range(0, len(pure_history), 15):
             chunk = pure_history[i:i+15]
             start_num = i + 1
             end_num = i + 15
             
-            html_str += f"<div class='trend-row'>"
-            html_str += f"<div class='trend-label'>第 {start_num}-{end_num} 局</div>"
-            html_str += "<div class='trend-grid'>"
+            html_trend += f"<div class='trend-row'>"
+            html_trend += f"<div class='trend-label'>第 {start_num:02d}-{end_num:02d} 分</div>"
+            html_trend += "<div class='trend-grid'>"
             
-            # 渲染这 15 个方块，不够的用空方格补齐，保持排版整齐
             for j in range(15):
                 if j < len(chunk):
                     opt = chunk[j]
                     ui_info = UI_MAP[opt]
-                    html_str += f"<div class='trend-box {ui_info['class']}'>{ui_info['char']}</div>"
+                    html_trend += f"<div class='icon-box sz-lg {ui_info['class']}'>{ui_info['char']}</div>"
                 else:
-                    html_str += "<div class='empty-box'></div>"
+                    html_trend += "<div class='empty-box'></div>"
                     
-            html_str += "</div></div>"
+            html_trend += "</div></div>"
             
-        html_str += "</div>"
-        st.markdown(html_str, unsafe_allow_html=True)
+        html_trend += "</div>"
+        st.markdown(html_trend, unsafe_allow_html=True)
     else:
         st.info("🚀 数据正在初始化抓取中，稍等几秒...")
-
-# 前端自动刷新机制：缩短到每5秒刷新一次前端画面，配合后台的5秒抓取，实现光速同步
-time.sleep(5)
-st.rerun()
