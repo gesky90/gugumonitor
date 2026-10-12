@@ -9,11 +9,12 @@ import pandas as pd
 import requests
 
 # ==========================================
-# 页面基础配置与 UI 样式注入
+# 页面基础配置与高颜值 UI 样式注入
 # ==========================================
 st.set_page_config(page_title="愤怒的小咕 - 纯净监控台", layout="wide")
 st.markdown("""
 <style>
+    /* 遗漏统计框 */
     .omit-box {
         background-color: white;
         border-top: 4px solid #ef4444;
@@ -22,17 +23,70 @@ st.markdown("""
         box-shadow: 0 1px 3px rgba(0,0,0,0.1);
         margin-bottom: 20px;
     }
+    
+    /* 走势图容器 */
+    .trend-container {
+        background: white;
+        padding: 20px;
+        border-radius: 8px;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        margin-top: 10px;
+    }
+    .trend-row {
+        display: flex;
+        align-items: center;
+        margin-bottom: 8px;
+        padding-bottom: 8px;
+        border-bottom: 1px dashed #f3f4f6;
+    }
+    .trend-label {
+        width: 85px;
+        font-size: 13px;
+        color: #6b7280;
+        font-weight: bold;
+    }
+    .trend-grid {
+        display: flex;
+        gap: 6px;
+    }
+    
+    /* 走势图方块基础样式 */
+    .trend-box {
+        width: 32px;
+        height: 32px;
+        border-radius: 6px;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        font-weight: bold;
+        font-size: 15px;
+    }
+    
+    /* === 颜色分级与发光特效 === */
+    /* 小奖 1-3：低调灰色 */
+    .bg-gray { background-color: #e5e7eb; color: #6b7280; } 
+    
+    /* 大奖 4-7：高亮渐变 + 发光特效 */
+    .bg-D { background-color: #a855f7; color: white; box-shadow: 0 0 8px rgba(168, 85, 247, 0.6); } /* 彩虹-紫 */
+    .bg-E { background-color: #ec4899; color: white; box-shadow: 0 0 8px rgba(236, 72, 153, 0.6); } /* 海盗-粉 */
+    .bg-F { background-color: #ef4444; color: white; box-shadow: 0 0 8px rgba(239, 68, 68, 0.6); } /* 摆锤-红 */
+    .bg-G { background-color: #eab308; color: white; box-shadow: 0 0 8px rgba(234, 179, 8, 0.6); }  /* 云霄-金 */
+    
+    .empty-box {
+        width: 32px; height: 32px; border-radius: 6px;
+        background-color: #f9fafb; border: 1px solid #f3f4f6;
+    }
 </style>
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 基础配置
+# 基础配置与视觉映射
 # ==========================================
 BASE_DIR = os.getcwd()
 DATA_FILE = os.path.join(BASE_DIR, 'game_history.json')
 CONFIG_FILE = os.path.join(BASE_DIR, 'sync_config.json')
-UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
 
+# 核心映射配置
 CONFIG = {
     'A': {'name': '观光小火车', 'm': 4},
     'B': {'name': '旋转木马', 'm': 4},
@@ -43,8 +97,18 @@ CONFIG = {
     'G': {'name': '云霄飞车', 'm': 30},
 }
 OPTIONS = list(CONFIG.keys())
-
 TOWER_MAP_REMOTE = {1: 'G', 2: 'F', 3: 'E', 4: 'D', 5: 'C', 6: 'B', 7: 'A'}
+
+# UI 视觉映射字典 (首字 + 颜色类)
+UI_MAP = {
+    'A': {'char': '观', 'class': 'bg-gray'},
+    'B': {'char': '旋', 'class': 'bg-gray'},
+    'C': {'char': '童', 'class': 'bg-gray'},
+    'D': {'char': '彩', 'class': 'bg-D'},
+    'E': {'char': '海', 'class': 'bg-E'},
+    'F': {'char': '星', 'class': 'bg-F'},
+    'G': {'char': '云', 'class': 'bg-G'}
+}
 
 # 状态管理
 if 'global_history' not in st.session_state:
@@ -53,17 +117,13 @@ if 'syncing' not in st.session_state:
     st.session_state.syncing = False
 
 def get_sync_config():
-    cfg = {"url": "https://lending-mon-manual-charge.trycloudflare.com", "interval": 15, "enabled": True}
+    cfg = {"url": "https://lending-mon-manual-charge.trycloudflare.com", "interval": 5, "enabled": True}
     try:
         if os.path.exists(CONFIG_FILE):
             with open(CONFIG_FILE, encoding='utf-8') as f:
                 cfg.update(json.load(f))
     except: pass
     return cfg
-
-def save_sync_config(cfg):
-    with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
-        json.dump(cfg, f, ensure_ascii=False, indent=2)
 
 def load_data():
     if os.path.exists(DATA_FILE):
@@ -81,13 +141,16 @@ def get_pure_history():
     return [x.get("result", x) if isinstance(x, dict) else x for x in st.session_state.global_history]
 
 # ==========================================
-# 远程同步后台线程
+# 远程同步后台线程 (高频防缓存)
 # ==========================================
 def fetch_remote_rows(day):
     cfg = get_sync_config()
-    url = cfg['url'].rstrip('/') + '/api/data?date=' + day
+    # 加上时间戳绕过 Cloudflare 缓存，确保秒级更新
+    url = f"{cfg['url'].rstrip('/')}/api/data?date={day}&_t={int(time.time())}"
     try:
-        resp = requests.get(url, timeout=15, headers={'User-Agent': UA})
+        # 使用 Session 提速
+        session = requests.Session()
+        resp = session.get(url, timeout=10)
         arr = resp.json()
         if not isinstance(arr, list): return []
         rows = []
@@ -123,7 +186,8 @@ def background_worker():
         cfg = get_sync_config()
         if cfg.get('enabled', True):
             sync_remote_once()
-        time.sleep(max(5, int(cfg.get('interval', 15))))
+        # 强制高频 5 秒刷新
+        time.sleep(5)
 
 if 'worker_started' not in st.session_state:
     load_data()
@@ -140,19 +204,7 @@ with st.sidebar:
     st.header("⚙️ 控制面板")
     st.write(f"当前累计记录: **{len(st.session_state.global_history)}** 局")
     
-    if st.button("清空所有数据", use_container_width=True):
-        st.session_state.global_history = []
-        save_data()
-        st.rerun()
-        
-    st.divider()
-    st.subheader("🌐 接口设置")
-    cfg = get_sync_config()
-    new_url = st.text_input("数据接口 URL", value=cfg.get('url', ''))
-    is_enabled = st.checkbox("启用后台自动同步", value=cfg.get('enabled', True))
-    
-    if st.button("保存并手动同步", use_container_width=True):
-        save_sync_config({"url": new_url, "interval": cfg.get('interval', 15), "enabled": is_enabled})
+    if st.button("🔄 手动刷新页面数据", use_container_width=True):
         sync_remote_once()
         st.rerun()
 
@@ -162,13 +214,11 @@ omit_counts = {o: 0 for o in OPTIONS}
 total_counts = {o: 0 for o in OPTIONS}
 
 for o in OPTIONS:
-    # 计算遗漏
     count = 0
     for x in reversed(pure_history):
         if x == o: break
         count += 1
     omit_counts[o] = count
-    # 计算累计出现次数
     total_counts[o] = pure_history.count(o)
 
 # --- 主界面布局 ---
@@ -190,7 +240,7 @@ with col1:
     st.markdown("</div>", unsafe_allow_html=True)
 
 with col2:
-    st.markdown("#### 📊 各项数据统计表")
+    st.markdown("#### 📊 数据统计大表")
     table_data = []
     for o in OPTIONS:
         table_data.append({
@@ -201,20 +251,40 @@ with col2:
         })
     st.dataframe(pd.DataFrame(table_data), use_container_width=True, hide_index=True)
     
-    st.markdown("#### 📌 历史走势图 (横向60分钟/1小时)")
+    # ----------------------------------------
+    # 高颜值走势图生成 (15局/行)
+    # ----------------------------------------
+    st.markdown("#### 📌 历史走势图 (15分钟/行)")
+    
     if len(pure_history) > 0:
-        trend_data = []
-        # 改为每 60 局（1小时）一行
-        for i in range(0, len(pure_history), 60):
-            chunk = pure_history[i:i+60]
-            row_dict = {"起始时间段": f"第 {i+1} 局起"}
-            for j in range(60):
-                row_dict[f"{j+1}分"] = f"{chunk[j]}" if j < len(chunk) else ""
-            trend_data.append(row_dict)
-        st.dataframe(pd.DataFrame(trend_data), use_container_width=True, hide_index=True)
+        html_str = "<div class='trend-container'>"
+        
+        # 将历史记录按 15 个一组进行切割
+        for i in range(0, len(pure_history), 15):
+            chunk = pure_history[i:i+15]
+            start_num = i + 1
+            end_num = i + 15
+            
+            html_str += f"<div class='trend-row'>"
+            html_str += f"<div class='trend-label'>第 {start_num}-{end_num} 局</div>"
+            html_str += "<div class='trend-grid'>"
+            
+            # 渲染这 15 个方块，不够的用空方格补齐，保持排版整齐
+            for j in range(15):
+                if j < len(chunk):
+                    opt = chunk[j]
+                    ui_info = UI_MAP[opt]
+                    html_str += f"<div class='trend-box {ui_info['class']}'>{ui_info['char']}</div>"
+                else:
+                    html_str += "<div class='empty-box'></div>"
+                    
+            html_str += "</div></div>"
+            
+        html_str += "</div>"
+        st.markdown(html_str, unsafe_allow_html=True)
     else:
-        st.info("数据积累中，请等待接口拉取...")
+        st.info("🚀 数据正在初始化抓取中，稍等几秒...")
 
-# 页面自动刷新逻辑 (保持每10秒刷新画面)
-time.sleep(10)
+# 前端自动刷新机制：缩短到每5秒刷新一次前端画面，配合后台的5秒抓取，实现光速同步
+time.sleep(5)
 st.rerun()
